@@ -1,62 +1,58 @@
+import logging
 import os
 import sys
 import time
 import json
 
 from threading import Thread
-from queue import Queue, Empty
-from channel import ServerChannel, ClientChannel, ChannelTimeout, ChannelException
+from queue import Queue
+from channel import ClientChannel, ServerChannel, ChannelTimeout, ChannelException
 from state import RestartState
 from messages import TimeoutMessage, ExceptionMessage, LogMessage, AckMessage, Message
+
+BASEPORT = 9000
+
+logger = logging.getLogger(__name__)
 
 
 class NodeController:
     def __init__(self, count):
         self.count = count
 
-class Node(Thread):
+        
+class Node:
     def __init__(self, control, index=0):
         super().__init__()
         self.control = control
         self.index = index
-        self.serve = True
+        self.channel = None
         self.state = RestartState(self)
-        
-    def connect(self, dst):
-        self.dest = dst
-        while True:
-            try:
-                return self.channel.connect()
-            except:
-                time.sleep(2)
+        self.currentTerm = 0
+        self.votedForm = 0
         
     def receive(self):
         try:
-            message = self.queue.get(timeout=1)
-        except Empty:
+            message = self.channel.receive()
+        except ChannelTimeout:
             message = TimeoutMessage()
-        if isinstance(message, ChannelTimeout):
-            message = TimeoutMessage()
-        if isinstance(message, ChannelException):
+        except ChannelException:
             message = ExceptionMessage(Node)
         return message
     
     def send(self, message):
-        message.seq = Message.seq
         dest = message.mdest
         if dest == self.index:
-            print(f'node{self.index}: Talking to myself')
+            logger.warning(f'node{self.index}: Talking to myself')
             return
-        if not dest in self.nodes:
-            print(f'node{self.index}: Going to created channel to {dest}')
-            self.nodes[dest] = ClientChannel(self.index, dest)
-            self.nodes[dest].start()
-            print(f'node{self.index}: Created channel to {dest}')
-        channel = self.nodes[dest]
-        print(f'node{self.index}: Sending {message} to {channel}')
-        channel.send(message)
-        Message.seq += 1
-        return message.seq
+        logger.debug(f'node{self.index}: Going to created channel to {dest}')
+        channel = ClientChannel(self, self.index, ('localhost', BASEPORT + dest))
+        channel.connect()
+        # logger.debug(f'node{self.index}: Sending {message} to {channel}')
+        try:
+            channel.send(message)
+        except ChannelException:
+            logger.error(f'node{self.index}: Failed sending to {dest}: {sys.exc_info()[1]}')
+            return
         
 
 class Config:
@@ -66,6 +62,9 @@ class Config:
             self.config = json.loads(open(self.path, 'r').read())
         else:
             self.config = {}
+
+    def __str__(self):
+        return str(self.config)
 
     def __getitem__(self, key):
         if not key in self.config:
@@ -78,50 +77,102 @@ class Config:
     def save(self):
         open(self.path, 'w+').write(json.dumps(self.config))
         
-    def __str__(self):
-        return str(self.config)
     
-
-class Server(Node):
-    def init(self):
-        self.config = Config(f'node{self.index}.json')
-        print(f'config={self.config}')
+class ServerQueue(Thread):
+    def __init__(self, node):
+        super().__init__()
+        self.node = node
+        self.index = node.index
         self.queue = Queue()
-        self.channel = ServerChannel(self, self.index)
-        self.channel.start()
-        self.nodes = {}
+        self.channel = ServerChannel(self, self.index, self.node.address)
         
     def run(self):
-        print(f'node{self.index}: Server ready')
         while True:
-            message = self.receive()
+            try:
+                message = self.channel.receive()
+                # logger.debug(f'{self.index}: Received {message}')
+            except ChannelTimeout:
+                message = TimeoutMessage()
+            except ChannelException:
+                message = ExceptionMessage(sys.exc_info())
+            self.queue.put(message)
+
+    def receive(self):
+        return self.queue.get()
+
+
+class ClientQueue(Thread):
+    def __init__(self, node):
+        super().__init__()
+        self.node = node
+        self.index = node.index
+        self.queue = Queue()
+        
+    def run(self):
+        logger.info(f'{self.index}: ClientQueue running')
+        while True:
+            message = self.queue.get()
+            try:
+                channel = ClientChannel(self.node, self.index, ('localhost', BASEPORT + message.mdest))
+                channel.connect()
+                channel.send(message)
+            except ChannelTimeout:
+                message = TimeoutMessage()
+            except ChannelException:
+                message = ExceptionMessage(sys.exc_info())
+
+    def send(self, message):
+        return self.queue.put(message)
+
+
+
+class Server(Node, Thread):
+    def init(self):
+        self.config = Config(f'node{self.index}.json')
+        logger.info(f'config={self.config}')
+        self.address = ('localhost', BASEPORT + self.index)
+        self.queue = ServerQueue(self)
+        self.queue.start()
+        self.out = ClientQueue(self)
+        self.out.start()
+        
+    def run(self):
+        logger.info(f'node{self.index}: Server ready on {self.address}')
+        while True:
+            message = self.queue.receive()
+            # logger.debug(f'{self.index}: Server received: {message}')
             handle = getattr(self.state, message.request)
             reply = handle(message)
             if reply:
                 self.send(reply)
                 self.config.save()
 
+    def send(self, m):
+        if self.index == m.mdest:
+            logger.error(f'{self.index}: Sending {message} to myself {m.mdest}')
+            return
+        self.out.send(m)
+        
     def close(self):
         self.config.save()
 
 
 class Client(Node):
-    def set_count(self, count):
+    def init(self, count=10):
         self.count = count
+        self.address = ('localhost', BASEPORT + self.index)
+        self.channel = ClientChannel(self, self.index, self.address)
         
     def run(self):
-        self.connect('node0')
+        self.channel.connect()
         for i in range(self.control.count):
             log = LogMessage(i, 'Some log message %d' % i)
             self.send(log)
-            if debug: print(f'Sent {log}')
-            ack = self.receive()
+            ack = self.channel.receive()
             if isinstance(ack, TimeoutMessage):
                 continue
             if not isinstance(ack, AckMessage):
                 print(f'Got bad ACK: {ack.request}')
-            if ack.seq != log.seq:
-                print(f'Bad seq no: Expected {log.seq}, got {ack.seq}')
                 
         
 debug = False
@@ -143,7 +194,7 @@ if __name__ == "__main__":
             server.start()
     else:
         client = Client(None)
-        client.set_count(10)
+        client.init(10)
         client.run()
     print('Time: ', time.time() - start)
         

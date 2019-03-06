@@ -1,11 +1,15 @@
+import traceback
 import sys
 import time
+import logging
 import pickle, json
+from random import randint
 
 from queue import Queue
 from threading import Thread
-from socket import socket, AF_INET, SOCK_STREAM, timeout
+from socket import socket, AF_INET, SOCK_STREAM, timeout, SOL_SOCKET, SO_REUSEADDR
 
+logger = logging.getLogger(__name__)
 
 class ChannelTimeout(Exception):
     pass
@@ -16,18 +20,38 @@ class ChannelException(Exception):
 
 
 class Channel(object):
-    def __init__(self, index, address):
+    def __init__(self, node, index, address):
+        self.node = node
         self.index = index
         self.address = address
         self.sock = None
 
     def __str__(self):
-        return f'Channel{self.index}: connected to {self.address}'
+        return f'chan{self.node.index}: Channel{self.index}: connected to {self.address}'
+    
+    def __del__(self):
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+        
+    def up(self):
+        return self.sock
     
     def connect(self):
-        self.sock = socket(AF_INET, SOCK_STREAM)
-        self.sock.settimeout(1)
-        self.sock.connect(self.address)
+        self.reconnect = self._connect
+            
+    def _connect(self):
+        self.retry = 0
+        while True:
+            try:
+                self.sock = socket(AF_INET, SOCK_STREAM)
+                self.sock.connect(self.address)
+                return
+            except:
+                self.retry += 1
+                logger.error(f'chan{self.node.index}: Connect failed to {self.address} ({self.retry}): {sys.exc_info()[1]}')
+                time.sleep(2 + self.retry)
+            
 
     def _receive_size(self, size):
         message = bytearray()
@@ -41,113 +65,67 @@ class Channel(object):
         return message
 
     def accept(self):
+        self.reconnect = self._accept
+            
+    def _accept(self):
         sock = socket(AF_INET, SOCK_STREAM)
+        sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
         sock.bind(self.address)
         sock.listen(5)
+        sock.settimeout(randint(2,9))
         self.sock, _ = sock.accept()
-        self.sock.settimeout(2 + self.index)
-        return self.sock, _
+        self.sock.settimeout(randint(2, 9))
     
     def send_data(self, data):
+        self.reconnect()
         size = len(data)
         header = b'%10d' % size
         self.sock.sendall(header)
         self.sock.sendall(data)
+        self.sock.close()
+        self.sock = None
 
     def receive_data(self):
+        self.reconnect()
         header = self._receive_size(10)
         size = int(header)
         data = self._receive_size(size)
+        self.sock = None
         return data
 
     def send(self, message):
         obj = pickle.dumps(message)
-        self.send_data(obj)
+        try:
+            self.send_data(obj)
+        except:
+            logger.error(f'chan{self.node.index}: Exception in send to {self.address}: {sys.exc_info()[1]}')
+            time.sleep(randint(2,9))
+            raise ChannelException(sys.exc_info())
 
     def receive(self):
         try:
             obj = self.receive_data()
             message = pickle.loads(obj)
+            # logger.debug(f'chan{self.node.index}: Got message: {message}')
             return message
         except timeout:
             raise ChannelTimeout(sys.exc_info())
         except IOError:
+            logger.errro(f'chan{self.node.index}: Exception in receive from {self.address}: {sys.exc_info()[1]}')
+            time.sleep(randint(2,9))
+            if self.sock:
+                self.sock.close()
+            self.sock = None
             raise ChannelException(sys.exc_info())
 
 
-class ClientChannel(Thread):
-    def __init__(self, index, dest):
-        super().__init__()
-        self.index = index
-        self.channel = None
-        self.queue = Queue()
-        self.address = ('localhost', BASEPORT + dest)
-        print(f'chan{index}: ClientChannel INIT to {self.address}')
-        
-    def __str__(self):
-        return f'chan{self.index}: ClientChannel to {self.address}'
-    
-    def send(self, message):
-        self.queue.put(message)
-        print(f'chan{self.index}: Put message on queue {message}')
-
-    def run(self):
-        while True:
-            if not self.channel:
-                self.channel = Channel(self.index, self.address)
-                try:
-                    self.channel.connect()
-                except:
-                    self.channel = None
-                    print(f'chan{self.index}: Exception connecting to {self.address}:', sys.exc_info()[1])
-                    time.sleep(2)
-                    continue
-                print(f'chan{self.index}: Created client channel to: {self.address}')
-            message = self.queue.get()
-            print(f'chan{self.index}: Sending {message}')
-            try:
-                self.channel.send(message)
-            except:
-                print(f'chan{self.index}: Exception in send({message})')
-                self.channel = None
+class ClientChannel(Channel):
+    def __init__(self, node, index, dest):
+        super().__init__(node, index, dest)
+        self.reconnect = self._connect
         
 
-class ServerSocket(Thread):
-    def __init__(self, server, channel):
-        super().__init__()
-        self.server = server
-        self.channel = channel
-
-    def run(self):
-        while True:
-            try:
-                message = self.channel.receive()
-            except ChannelTimeout:
-                message = ChannelTimeout()
-                time.sleep(1)
-            except ChannelException:
-                message = ChannelException(sys.exc_info())
-                time.sleep(1)
-            self.server.queue.put(message)
-                
-            
-BASEPORT = 9000        
-class ServerChannel(Thread):
-    def __init__(self, server, index):
-        super().__init__()
-        self.server = server
-        self.index = index
-        self.port = BASEPORT + index
-        
-    def run(self):
-        while True:
-            channel = Channel(self.index, ('localhost', self.port))
-            try:
-                self.sock, _ = channel.accept()
-            except:
-                print(f'chan{self.index}: Exception in accept()', sys.exc_info())
-                time.sleep(2)
-                continue
-            print(f'chan{self.index}: Created Server on port: {self.port} from {self.sock.getpeername()}')
-            s = ServerSocket(self.server, channel)
-            s.start()
+class ServerChannel(Channel, Thread):
+    def __init__(self, node, index, address):
+        super().__init__(node, index, address)
+        self.reconnect = self._accept

@@ -1,2 +1,4 @@
+*.json
+raft.log
 venv/
 __pycache__/

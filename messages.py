@@ -1,14 +1,12 @@
 class Message(object):
     request = 'unknown'
-    seq = 0
 
     def __init__(self):
         self.mdest = None
         self.msource = None
-        self.seq = None
 
     def __str__(self):
-        return f'(dest={self.mdest}, seq={self.seq}) {self.request}: '
+        return f'dest={self.mdest}, req={self.request}: '
     
 
 class TimeoutMessage(Message):
@@ -32,9 +30,8 @@ class ExceptionMessage(Message):
 class AckMessage(Message):
     request = 'ack'
 
-    def __init__(self, dst, seq):
+    def __init__(self, dst):
         self.mdest = dst
-        self.seq = seq
         
     def __str__(self):
         return super().__str__() + f'ACK'
@@ -59,8 +56,8 @@ class LogMessage(Message):
         return super().__str__() + f'LogMessage: {self.index}, {self.record}'
 
 
-class RequestVoteMessage(Message):
-    request = 'vote'
+class RequestVoteRequest(Message):
+    request = 'request_vote_request'
     
     def __init__(self, mterm, mlastLogTerm, mlastLogIndex, msource, mdest):
         self.mtype = self.request
@@ -73,8 +70,8 @@ class RequestVoteMessage(Message):
     def __str__(self):
         return super().__str__() + f'Vote'
 
-class RequestVoteMessageResponse(Message):
-    request = 'vote_response'
+class RequestVoteResponse(Message):
+    request = 'request_vote_response'
 
     def __init__(self, mterm, mlastLogTerm, mlastLogIndex, msource, mdest):
         self.mtype = self.request
@@ -85,5 +82,5 @@ class RequestVoteMessageResponse(Message):
         self.mdest = mdest
         
     def __str__(self):
-        return super().__str__() + f'VoteResponse'
+        return super().__str__() + f'VoteResponse (to={self.mdest}, from={self.msource})'
 
