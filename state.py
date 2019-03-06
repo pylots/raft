@@ -1,9 +1,9 @@
-from events import *        
+from messages import *        
 
 
 class State(object):
-    def __init__(self, server):
-        self.server = server
+    def __init__(self, node):
+        self.node = node
         self.tout = 0
         
     def enter(self):
@@ -14,9 +14,9 @@ class State(object):
         pass
     
     def set_state(self, state):
-        self.server.state.leave()
-        self.server.state = state(self.server)
-        self.server.state.enter()
+        self.node.state.leave()
+        self.node.state = state(self.node)
+        self.node.state.enter()
 
     def exception(self, exc):
         print(f'{self}: exception {exc}')
@@ -24,47 +24,50 @@ class State(object):
 
     def timeout(self, m):
         print(f'{self}: timeout {m}')
-        self.tout += 1
-        if self.tout > 5:
-            self.set_state(TimeoutState)
         return None
     
     def log(self, log):
-        print(f'{log}')
-        return AckEvent(log.seq)
+        pass
     
     def vote(self, vote):
-        print(f'{vote}')
-        return AckEvent(vote.seq)
+        pass
 
     def entries(self, entries):
-        print(f'{entries}')
-        return AckEvent(entries.seq)
+        pass
     
     def __str__(self):
         return self.__class__.__name__
 
-
-class TimeoutState(State):
-    def enter(self):
-        print(f'Enter Timeout')
-
+class RestartState(State):
     def timeout(self, m):
-        print(f'Going back to State')
-        self.set_state(State)
-        
+        print(f'state{self.node.index}: timeout in restart, nodes={self.node.control.count}')
+        self.node.config['votedFor'] += 1
+        for index in range(self.node.control.count):
+            if index != self.node.index:
+                print(f'state{self.node.index}: Send RequestVote to {index}')
+                self.node.send(RequestVoteMessage(0, 0, 0, self.node.index, index))
 
+    def vote(self, m):
+        print(f'state{self.node.index}: Got a vote request from {m.msource}')
+        dest = m.msource
+        return RequestVoteMessageResponse(0, 0, 0, self.node.index, dest)
+    
+    def vote_response(self, m):
+        print(f'state{self.node.index}: Got a vote response from {m.msource}')
+        return None
+    
 class FollowerState(State):
-    def timeout(self):
+    def timeout(self, m):
+        self.dispatch.requestVote()
         self.set_state(CandidateState)
 
 class CandidateState(State):
-    def timeout(self):
+    def timeout(self, m):
         pass
     
 class LeaderState(State):
-    def timeout(self):
-        self.set_state(VoteState)
+    def timeout(self, m):
+        pass
 
     def log(self, log):
         print(f'log: {log}')

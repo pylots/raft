@@ -1,18 +1,20 @@
 import logging
-from events import LogEvent, AckEvent
+from messages import LogMessage, AckMessage
 from node import Client
+
 
 class RaftHandler(logging.Handler):
     def __init__(self, address):
         super().__init__()
-        self.client = Client(address)
-        self.client.connect()
+        self.client = Client('logger', address)
+        self.client.connect('node0')
         self.index = 0
         
     def emit(self, record):
-        log = LogEvent(self.index, record)
-        if not self.client.call(log):
-            print(f'FAILED: {log}')
+        log = LogMessage(self.index, record)
+        self.client.send(log)
+        ack = self.client.receive()
+        print(f'Saved: {log} {ack}')
         self.index += 1
 
     def query(self, index):
