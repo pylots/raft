@@ -2,12 +2,15 @@ import logging
 
 from messages import *        
 
-logging.basicConfig(filename='raft.log',
-                    level=logging.DEBUG,
-                    format='%(asctime)s.%(msecs)03d %(levelname).3s [%(name)s:%(lineno)s] %(message)s',
-                    datefmt='%y%m%d %H%M%S')
+logging.basicConfig(
+    filename='raft.log',
+    level=logging.DEBUG,
+    format='%(asctime)s.%(msecs)03d %(levelname).3s [%(name)s:%(lineno)s] %(message)s',
+    datefmt='%y%m%d %H%M%S'
+)
 
 logger = logging.getLogger(__name__)
+
 
 class State(object):
     def __init__(self, node):
@@ -50,10 +53,12 @@ class State(object):
     def entries(self, entries):
         pass
 
+
 class RestartState(State):
     def timeout(self, m):
         self.set_state(FollowerState)
         
+
 class FollowerState(State):
 
     def timeout(self, m):
