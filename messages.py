@@ -2,18 +2,22 @@ class Message(object):
     request = 'unknown'
 
     def __init__(self):
-        self.mdest = None
-        self.msource = None
+        self.mdest = '*'
+        self.msource = '*'
 
     def __str__(self):
-        return f'dest={self.mdest}, req={self.request}: '
+        return f'({self.msource}=>{self.mdest}) {self.request}: '
     
 
 class TimeoutMessage(Message):
     request = 'timeout'
 
+    def __init__(self, timeout):
+        super().__init__()
+        self.timeout = timeout
+
     def __str__(self):
-        return super().__str__() + f'timeout'
+        return super().__str__() + f'({self.timeout}) '
 
 
 class ExceptionMessage(Message):
@@ -24,7 +28,7 @@ class ExceptionMessage(Message):
         self.exception = e
 
     def __str__(self):
-        return super().__str__() + f'exception {self.exception}'
+        return super().__str__() + f'{self.exception}'
 
 
 class AckMessage(Message):
@@ -33,17 +37,10 @@ class AckMessage(Message):
     def __init__(self, dst):
         self.mdest = dst
         
-    def __str__(self):
-        return super().__str__() + f'ACK'
-    
 
 class NackMessage(Message):
     request = 'nack'
     
-    def __str__(self):
-        return super.__str__() + f'NACK'
-    
-
 class LogMessage(Message):
     request = 'log'
 
@@ -53,13 +50,13 @@ class LogMessage(Message):
         self.record = record
         
     def __str__(self):
-        return super().__str__() + f'LogMessage: {self.index}, {self.record}'
+        return super().__str__() + f'{self.index}, {self.record}'
 
 
 class RequestVoteRequest(Message):
     request = 'request_vote_request'
     
-    def __init__(self, mterm, mlastLogTerm, mlastLogIndex, msource, mdest):
+    def __init__(self, mterm, mlastLogTerm, mlastLogIndex, msource=None, mdest=None):
         self.mtype = self.request
         self.mterm = mterm
         self.mlastLogTerm = mlastLogTerm
@@ -68,12 +65,12 @@ class RequestVoteRequest(Message):
         self.mdest = mdest
         
     def __str__(self):
-        return super().__str__() + f'Vote'
-
+        return super().__str__() + f' mterm={self.mterm}, mlastLogTerm={self.mlastLogTerm}, mlastLogIndex={self.mlastLogIndex}'
+        
 class RequestVoteResponse(Message):
     request = 'request_vote_response'
 
-    def __init__(self, mterm, mlastLogTerm, mlastLogIndex, msource, mdest):
+    def __init__(self, mterm, mlastLogTerm, mlastLogIndex, msource=None, mdest=None):
         self.mtype = self.request
         self.mterm = mterm
         self.mlastLogTerm = mlastLogTerm
@@ -82,5 +79,35 @@ class RequestVoteResponse(Message):
         self.mdest = mdest
         
     def __str__(self):
-        return super().__str__() + f'VoteResponse (to={self.mdest}, from={self.msource})'
+        return super().__str__() + f' mterm={self.mterm}, mlastLogTerm={self.mlastLogTerm}, mlastLogIndex={self.mlastLogIndex}'
 
+class AppendEntriesRequest(Message):
+    request = 'append_entries_request'
+
+    def __init__(self, mterm, mprevLogIndex, mprevLogTerm, mentries, mcommitIndex, msource=None, mdest=None):
+        self.mtype = self.request
+        self.mprevLogIndex = mprevLogIndex
+        self.mprevLogTerm = mprevLogTerm
+        self.mentries = mentries
+        self.mcommitIndex = mcommitIndex
+        self.msource = msource
+        self.mdest = mdest
+
+    def __str(self):
+        return super().__str__() + f' mprevLogIndex={self.mprevLogIndex}, mprevLogTerm={self.mprevLogTerm}, mcommitIndex={self.mcommitIndex}'
+
+
+class AppendEntriesResponse(Message):
+    request = 'append_entries_response'
+
+    def __init__(self, mterm, msuccess, mmatchIndex, msource=None, mdest=None, m=None):
+        self.mtype = self.request
+        self.mterm = mterm
+        self.msuccess = msuccess
+        self.mmatchIndex = mmatchIndex
+        self.msource = msource
+        self.mdest = mdest
+        self.m = m
+
+    def __str__(self):
+        return super().__str__() + f' mterm={self.mterm}, msuccess={self.msuccess}, mmatchIndex={self.mmatchIndex}'

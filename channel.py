@@ -28,7 +28,7 @@ class Channel(object):
 
     def __str__(self):
         return f'chan{self.node.index}: Channel{self.index}: connected to {self.address}'
-    
+
     def __del__(self):
         if self.sock:
             self.sock.close()
@@ -42,16 +42,16 @@ class Channel(object):
             
     def _connect(self):
         self.retry = 0
-        while True:
+        while self.retry < 5:
             try:
                 self.sock = socket(AF_INET, SOCK_STREAM)
                 self.sock.connect(self.address)
                 return
             except:
                 self.retry += 1
-                logger.error(f'chan{self.node.index}: Connect failed to {self.address} ({self.retry}): {sys.exc_info()[1]}')
-                time.sleep(2 + self.retry)
-            
+                logger.warning(f'{self}: Connect failed to {self.address} ({self.retry}): {sys.exc_info()[1]}')
+                # time.sleep(1 + self.retry)
+        logger.error(f'{self}: Gave up trying to connect to {self.address}')
 
     def _receive_size(self, size):
         message = bytearray()
@@ -72,9 +72,9 @@ class Channel(object):
         sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
         sock.bind(self.address)
         sock.listen(5)
-        sock.settimeout(randint(2,9))
+        sock.settimeout(1)
         self.sock, _ = sock.accept()
-        self.sock.settimeout(randint(2, 9))
+        self.sock.settimeout(1)
     
     def send_data(self, data):
         self.reconnect()
@@ -90,6 +90,7 @@ class Channel(object):
         header = self._receive_size(10)
         size = int(header)
         data = self._receive_size(size)
+        self.sock.close()
         self.sock = None
         return data
 
@@ -99,7 +100,6 @@ class Channel(object):
             self.send_data(obj)
         except:
             logger.error(f'chan{self.node.index}: Exception in send to {self.address}: {sys.exc_info()[1]}')
-            time.sleep(randint(2,9))
             raise ChannelException(sys.exc_info())
 
     def receive(self):

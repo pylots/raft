@@ -3,6 +3,8 @@ import os
 import sys
 import time
 import json
+import copy
+from random import randint
 
 from threading import Thread
 from queue import Queue
@@ -14,46 +16,133 @@ BASEPORT = 9000
 
 logger = logging.getLogger(__name__)
 
+blue = '\001\033[34m\002'
+green = '\001\033[32m\002'
+red = '\001\033[31m\002'
+reset = '\001\033[0m\002'
+bold = '\001\033[1m\002'
+bunder = '\001\033[4m\002'
+eunder = '\001\033[24m\002'
+colormap = {
+    'R': reset, 'F': green, 'C': red, 'L': blue,
+}
+
 
 class NodeController:
     def __init__(self, count):
+        self.status_text = None
         self.count = count
+        self.nodes = []
+        for index in range(self.count):
+            node = Server(self, index)
+            self.nodes.append(node)
 
-        
+    def init(self):
+        logger.info('*** Starting ***')
+        for node in self.nodes:
+            node.init()
+
+    def start(self):
+        for node in self.nodes:
+            node.start()
+
+    def get_node(self, index):
+        if index < 0 or index >= len(self.nodes):
+            logger.error(f'Bad node index: {index}')
+            return None
+        return self.nodes[index]
+
+    def set_status_text(self, text):
+        self.status_text = text
+
+    def print_status(self, index, request, response):
+        status = '%04d: [' % int(time.time() % 10000)
+        i = 0
+        t = 1
+        for node in self.nodes:
+            s = node.state.__class__.__name__[0]
+            m_in = node.in_queue.qsize()
+            m_out = node.out_queue.qsize()
+            color = reset
+            if s in colormap:
+                color = colormap[s]
+            if i == index:
+                t = node.timeout
+                status = status + bunder + color + s + eunder + reset
+            else:
+                status = status + color + s + reset
+            i += 1
+        status += f'] {index}:{t} {m_in}:{m_out} {request}'
+        if response:
+            status += f' => {response.mdest}: {response.request}'
+        if self.status_text:
+            status += self.status_text
+            self.status_text = None
+        print(status)
+
+
 class Node:
     def __init__(self, control, index=0):
         super().__init__()
         self.control = control
         self.index = index
+        self.config = Config(f'node{self.index}.json')
+        logger.info(f'config={self.config}')
+        self.address = ('localhost', BASEPORT + self.index)
         self.channel = None
-        self.state = RestartState(self)
+        self.timeout = 1
+        self.lastTerm = 0
+        # The server's state (Follower, Candidate, or Leader).
+        self.state = None
+        # The server's term number.
         self.currentTerm = 0
-        self.votedForm = 0
-        
-    def receive(self):
-        try:
-            message = self.channel.receive()
-        except ChannelTimeout:
-            message = TimeoutMessage()
-        except ChannelException:
-            message = ExceptionMessage(Node)
-        return message
+        # The candidate the server voted for in its current term, or
+        # None if it hasn't voted for any.
+        self.votedFor = None
+        # A Sequence of log entries. The index into this sequence is the index of the
+        # log entry. Unfortunately, the Sequence module defines Head(s) as the entry
+        # with index 1, so be careful not to use that!
+        self.log = []
+        # The index of the latest entry in the log the state machine may apply.
+        self.commitIndex = 0
+        # The following variables are used only on candidates:
+        # The set of servers from which the candidate has received a RequestVote
+        # response in its currentTerm.
+        self.votesResponded = []
+        # The set of servers from which the candidate has received a vote in its
+        # currentTerm.
+        self.votesGranted = []
+        # The following variables are used only on leaders:
+        # The next entry to send to each follower.
+        self.nextIndex = 0
+        # The latest entry that each follower has acknowledged is the same as the
+        # leader's. This is used to calculate commitIndex on the leader.
+        self.matchIndex = 0
+
+    def __str__(self):
+        return f'node{self.index}: ({self.currentTerm}): {self.state}'
+
+    def init(self):
+        self.set_state(RestartState)
     
-    def send(self, message):
-        dest = message.mdest
-        if dest == self.index:
-            logger.warning(f'node{self.index}: Talking to myself')
-            return
-        logger.debug(f'node{self.index}: Going to created channel to {dest}')
-        channel = ClientChannel(self, self.index, ('localhost', BASEPORT + dest))
-        channel.connect()
-        # logger.debug(f'node{self.index}: Sending {message} to {channel}')
-        try:
-            channel.send(message)
-        except ChannelException:
-            logger.error(f'node{self.index}: Failed sending to {dest}: {sys.exc_info()[1]}')
-            return
-        
+    def set_state(self, state):
+        self.timeout = randint(5,9)
+        logger.debug(f'{self}: Set new state {state}')
+        if self.state:
+            self.state.leave()
+        self.state = state(self)
+        self.state.enter()
+
+    def dispatch(self, message):
+        logger.debug(f'{self}: Dispatching {message}')
+        for index in range(self.control.count):
+            if index != self.index:
+                m = copy.deepcopy(message)
+                m.msource = self.index
+                m.mdest = index
+                logger.debug(f'{self}: Send {m} to node{index}')
+                self.send(m)
+
 
 class Config:
     def __init__(self, name):
@@ -67,38 +156,52 @@ class Config:
         return str(self.config)
 
     def __getitem__(self, key):
-        if not key in self.config:
+        if key not in self.config:
             self.config[key] = 0
         return self.config[key]
-            
+
     def __setitem__(self, key, val):
         self.config[key] = val
 
     def save(self):
         open(self.path, 'w+').write(json.dumps(self.config))
-        
-    
+
+
 class ServerQueue(Thread):
     def __init__(self, node):
         super().__init__()
         self.node = node
         self.index = node.index
-        self.queue = Queue()
+        self.server_q = Queue()
         self.channel = ServerChannel(self, self.index, self.node.address)
-        
+
+    def qsize(self):
+        return self.server_q.qsize()
+
     def run(self):
+        now = time.time()
         while True:
             try:
                 message = self.channel.receive()
-                # logger.debug(f'{self.index}: Received {message}')
+                # logger.debug(f'{self.node}: Server got message from channel: {message}, now={now}')
             except ChannelTimeout:
-                message = TimeoutMessage()
+                nnow = time.time()
+                if nnow - now < self.node.timeout:
+                    # logger.debug(f'{self.node}: Not no time for timeout {self.node.timeout}, ({nnow-now})')
+                    continue
+                # logger.debug(f'{self.node}: Finaly a timeout')
+                message = TimeoutMessage(int(time.time()-now))
             except ChannelException:
                 message = ExceptionMessage(sys.exc_info())
-            self.queue.put(message)
-
+            self.server_q.put(message)
+            nnow = time.time()
+            # logger.debug(f'{self.node}: timeout = {self.node.timeout}, time passed: {nnow-now} ({onow-now})')
+            now = time.time()
+            
     def receive(self):
-        return self.queue.get()
+        message = self.server_q.get()
+        logger.debug(f'{self.node}: Received {message}')
+        return message
 
 
 class ClientQueue(Thread):
@@ -106,53 +209,57 @@ class ClientQueue(Thread):
         super().__init__()
         self.node = node
         self.index = node.index
-        self.queue = Queue()
-        
+        self.client_q = Queue()
+
+    def qsize(self):
+        return self.client_q.qsize()
+
     def run(self):
         logger.info(f'{self.index}: ClientQueue running')
         while True:
-            message = self.queue.get()
+            message = self.client_q.get()
             try:
+                # logger.debug(f'{self.node}: SendThread: {message}')
                 channel = ClientChannel(self.node, self.index, ('localhost', BASEPORT + message.mdest))
                 channel.connect()
                 channel.send(message)
-            except ChannelTimeout:
-                message = TimeoutMessage()
-            except ChannelException:
-                message = ExceptionMessage(sys.exc_info())
+                # logger.debug(f'{self.node}: Sent {message}')
+            except:
+                logger.info(f'Exception sending: {message} {sys.exc_info()[1]}')
 
     def send(self, message):
-        return self.queue.put(message)
+        # logger.debug(f'{self.node}: client_q put {message}')
+        return self.client_q.put(message)
 
 
 
 class Server(Node, Thread):
     def init(self):
-        self.config = Config(f'node{self.index}.json')
-        logger.info(f'config={self.config}')
-        self.address = ('localhost', BASEPORT + self.index)
-        self.queue = ServerQueue(self)
-        self.queue.start()
-        self.out = ClientQueue(self)
-        self.out.start()
-        
+        super().init()
+        self.in_queue = ServerQueue(self)
+        self.out_queue = ClientQueue(self)
+
     def run(self):
         logger.info(f'node{self.index}: Server ready on {self.address}')
+        self.in_queue.start()
+        self.out_queue.start()
         while True:
-            message = self.queue.receive()
+            message = self.in_queue.receive()
             # logger.debug(f'{self.index}: Server received: {message}')
             handle = getattr(self.state, message.request)
             reply = handle(message)
             if reply:
                 self.send(reply)
                 self.config.save()
+            self.control.print_status(index=self.index, request=message,
+                                      response=reply)
 
     def send(self, m):
         if self.index == m.mdest:
-            logger.error(f'{self.index}: Sending {message} to myself {m.mdest}')
+            logger.error(f'{self.index}: Sending {m} to myself {m.mdest}')
             return
-        self.out.send(m)
-        
+        self.out_queue.send(m)
+
     def close(self):
         self.config.save()
 
@@ -162,7 +269,7 @@ class Client(Node):
         self.count = count
         self.address = ('localhost', BASEPORT + self.index)
         self.channel = ClientChannel(self, self.index, self.address)
-        
+
     def run(self):
         self.channel.connect()
         for i in range(self.control.count):
@@ -185,16 +292,12 @@ if __name__ == "__main__":
         debug = True
     start = time.time()
     if serve:
+        print('Starting NodeController')
         nc = NodeController(5)
-        print(f'count={nc.count}')
-        for index in range(nc.count):
-            print(f'node{index}: Create server on {index}')
-            server = Server(nc, index)
-            server.init()
-            server.start()
+        nc.init()
+        nc.start()
     else:
         client = Client(None)
         client.init(10)
         client.run()
-    print('Time: ', time.time() - start)
         
