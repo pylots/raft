@@ -1,13 +1,11 @@
-import traceback
 import sys
 import time
 import logging
-import pickle, json
+import pickle
+import socket
 from random import randint
 
-from queue import Queue
 from threading import Thread
-from socket import socket, AF_INET, SOCK_STREAM, timeout, SOL_SOCKET, SO_REUSEADDR
 
 logger = logging.getLogger(__name__)
 
@@ -31,26 +29,27 @@ class Channel(object):
 
     def __del__(self):
         if self.sock:
-            self.sock.close()
+            # self.sock.close()
             self.sock = None
-        
+
     def up(self):
         return self.sock
-    
+
     def connect(self):
         self.reconnect = self._connect
-            
+
     def _connect(self):
         self.retry = 0
         while self.retry < 5:
             try:
-                self.sock = socket(AF_INET, SOCK_STREAM)
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.sock.connect(self.address)
+                self.retry = 0
                 return
             except:
                 self.retry += 1
                 logger.warning(f'{self}: Connect failed to {self.address} ({self.retry}): {sys.exc_info()[1]}')
-                # time.sleep(1 + self.retry)
+                time.sleep(1 + self.retry)
         logger.error(f'{self}: Gave up trying to connect to {self.address}')
 
     def _receive_size(self, size):
@@ -66,23 +65,23 @@ class Channel(object):
 
     def accept(self):
         self.reconnect = self._accept
-            
+
     def _accept(self):
-        sock = socket(AF_INET, SOCK_STREAM)
-        sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(self.address)
-        sock.listen(5)
+        sock.listen(10)
         sock.settimeout(1)
         self.sock, _ = sock.accept()
         self.sock.settimeout(1)
-    
+
     def send_data(self, data):
         self.reconnect()
         size = len(data)
         header = b'%10d' % size
         self.sock.sendall(header)
         self.sock.sendall(data)
-        self.sock.close()
+        # self.sock.close()
         self.sock = None
 
     def receive_data(self):
@@ -90,7 +89,7 @@ class Channel(object):
         header = self._receive_size(10)
         size = int(header)
         data = self._receive_size(size)
-        self.sock.close()
+        # self.sock.close()
         self.sock = None
         return data
 
@@ -108,11 +107,11 @@ class Channel(object):
             message = pickle.loads(obj)
             # logger.debug(f'chan{self.node.index}: Got message: {message}')
             return message
-        except timeout:
+        except socket.timeout:
             raise ChannelTimeout(sys.exc_info())
         except IOError:
             logger.errro(f'chan{self.node.index}: Exception in receive from {self.address}: {sys.exc_info()[1]}')
-            time.sleep(randint(2,9))
+            time.sleep(randint(2, 9))
             if self.sock:
                 self.sock.close()
             self.sock = None
@@ -123,7 +122,7 @@ class ClientChannel(Channel):
     def __init__(self, node, index, dest):
         super().__init__(node, index, dest)
         self.reconnect = self._connect
-        
+
 
 class ServerChannel(Channel, Thread):
     def __init__(self, node, index, address):

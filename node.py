@@ -10,9 +10,17 @@ from threading import Thread
 from queue import Queue
 from channel import ClientChannel, ServerChannel, ChannelTimeout, ChannelException
 from state import RestartState
-from messages import TimeoutMessage, ExceptionMessage, LogMessage, AckMessage, Message
+from messages import TimeoutMessage, ExceptionMessage, LogMessage, AckMessage
 
 BASEPORT = 9000
+
+logging.basicConfig(
+    filename='raft.log',
+    level=logging.INFO,
+    format='%(asctime)s.%(msecs)03d %(levelname).3s [%(name)s:%(lineno)s] %(message)s',
+    datefmt='%y%m%d %H%M%S'
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +82,7 @@ class NodeController:
             i += 1
         status += f'] {index}:{t} {m_in}:{m_out} {request}'
         if response:
-            status += f' => {response.mdest}: {response.request}'
+            status += f'=>{response.mdest}: {response.request}'
         if self.status_text:
             status += self.status_text
             self.status_text = None
@@ -124,9 +132,9 @@ class Node:
 
     def init(self):
         self.set_state(RestartState)
-    
+
     def set_state(self, state):
-        self.timeout = randint(5,9)
+        self.timeout = randint(5, 9)
         logger.debug(f'{self}: Set new state {state}')
         if self.state:
             self.state.leave()
@@ -142,6 +150,7 @@ class Node:
                 m.mdest = index
                 logger.debug(f'{self}: Send {m} to node{index}')
                 self.send(m)
+                time.sleep(0.1)
 
 
 class Config:
@@ -197,10 +206,10 @@ class ServerQueue(Thread):
             nnow = time.time()
             # logger.debug(f'{self.node}: timeout = {self.node.timeout}, time passed: {nnow-now} ({onow-now})')
             now = time.time()
-            
+
     def receive(self):
         message = self.server_q.get()
-        logger.debug(f'{self.node}: Received {message}')
+        # logger.debug(f'{self.node}: Received {message}')
         return message
 
 
@@ -216,21 +225,27 @@ class ClientQueue(Thread):
 
     def run(self):
         logger.info(f'{self.index}: ClientQueue running')
+        self.retry = 0
         while True:
-            message = self.client_q.get()
+            if self.retry > 5:
+                logger.error(f'Giving up on sending message: {message}')
+                self.retry = 0
+            if not self.retry:
+                message = self.client_q.get()
             try:
                 # logger.debug(f'{self.node}: SendThread: {message}')
                 channel = ClientChannel(self.node, self.index, ('localhost', BASEPORT + message.mdest))
                 channel.connect()
                 channel.send(message)
+                self.retry = 0
                 # logger.debug(f'{self.node}: Sent {message}')
             except:
-                logger.info(f'Exception sending: {message} {sys.exc_info()[1]}')
+                logger.warning(f'Exception sending: {message} {sys.exc_info()[1]}')
+                self.retry += 1
 
     def send(self, message):
         # logger.debug(f'{self.node}: client_q put {message}')
         return self.client_q.put(message)
-
 
 
 class Server(Node, Thread):
@@ -246,7 +261,7 @@ class Server(Node, Thread):
         while True:
             message = self.in_queue.receive()
             # logger.debug(f'{self.index}: Server received: {message}')
-            handle = getattr(self.state, message.request)
+            handle = getattr(self.state, f'on_{message.request}')
             reply = handle(message)
             if reply:
                 self.send(reply)
@@ -280,8 +295,8 @@ class Client(Node):
                 continue
             if not isinstance(ack, AckMessage):
                 print(f'Got bad ACK: {ack.request}')
-                
-        
+
+
 debug = False
 if __name__ == "__main__":
     port = 8888
@@ -300,4 +315,3 @@ if __name__ == "__main__":
         client = Client(None)
         client.init(10)
         client.run()
-        

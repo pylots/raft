@@ -86,6 +86,7 @@ class AppendEntriesRequest(Message):
 
     def __init__(self, mterm, mprevLogIndex, mprevLogTerm, mentries, mcommitIndex, msource=None, mdest=None):
         self.mtype = self.request
+        self.mterm = mterm
         self.mprevLogIndex = mprevLogIndex
         self.mprevLogTerm = mprevLogTerm
         self.mentries = mentries
