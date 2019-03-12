@@ -25,6 +25,9 @@ class State(object):
     def get_node(self, index):
         return self.node.control.get_node(index)
 
+    def on_system(self, m):
+        logger.debug(f'{self}: system {m}')
+        
     def on_exception(self, exc):
         logger.error(f'{self}: exception {exc}')
         return None
@@ -42,22 +45,8 @@ class State(object):
     def on_append_entries_request(self, entries):
         logger.error(f'{self}: AppendEntriesRequest not implemented')
 
-    def on_append_entries_response(self):
+    def on_append_entries_response(self, m):
         logger.error(f'{self}: AppendEntriesResponse not implemented')
-
-
-class RestartState(State):
-    def on_timeout(self, m):
-        self.node.currentTerm = 1  # 142
-        self.node.votedFor = None
-        self.node.set_state(FollowerState)
-        self.node.votesResponded = []
-
-    def on_request_vote_request(self, vote):
-        self.on_timeout(self, None)
-
-    def on_append_entries_request(self, entries):
-        self.on_timeout(self, None)
 
 
 class FollowerState(State):
@@ -148,8 +137,17 @@ class CandidateState(State):
 class LeaderState(State):
     def enter(self):
         self.node.timeout = 1
+        self.termcount = 0
+
+    def on_log(self, m):
+        logger.info(f'{self}: Got log message {m}')
+        return AckMessage()
 
     def on_timeout(self, m):
+        self.termcount += 1
+        if self.termcount > 10:
+            self.node.set_state(FollowerState)
+            return
         self.node.dispatch(AppendEntriesRequest(self.node.currentTerm, 0, 0, [], 0))
 
     def on_append_entries_request(self, m):

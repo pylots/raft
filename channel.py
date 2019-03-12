@@ -18,113 +18,87 @@ class ChannelException(Exception):
 
 
 class Channel(object):
-    def __init__(self, node, index, address):
-        self.node = node
+    def __init__(self, index, sock=None):
         self.index = index
-        self.address = address
-        self.sock = None
+        self.sock = sock
 
     def __str__(self):
-        return f'chan{self.node.index}: Channel{self.index}: connected to {self.address}'
+        return f'chan{self.index}'
 
     def __del__(self):
+        logger.debug(f'{self}: GC {self.sock}')
         if self.sock:
-            # self.sock.close()
-            self.sock = None
+            self.sock.close()
+        self.sock = None
 
-    def up(self):
-        return self.sock
-
-    def connect(self):
-        self.reconnect = self._connect
-
-    def _connect(self):
+    def connect(self, address):
         self.retry = 0
         while self.retry < 5:
             try:
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.sock.connect(self.address)
+                logger.debug(f'{self}: Connecting to {address}')
+                self.sock.connect(address)
                 self.retry = 0
+                logger.debug(f'{self}: Got a connection to {address}')
                 return
-            except:
+            except OSError as e:
                 self.retry += 1
-                logger.warning(f'{self}: Connect failed to {self.address} ({self.retry}): {sys.exc_info()[1]}')
+                logger.warning(f'{self}: Connect failed to {address} ({self.retry}): {e}')
                 time.sleep(1 + self.retry)
-        logger.error(f'{self}: Gave up trying to connect to {self.address}')
+        logger.error(f'{self}: Gave up trying to connect to {address}')
 
     def _receive_size(self, size):
         message = bytearray()
         while size > 0:
             fragment = self.sock.recv(size)
             if not fragment:
-                self.sock = None
-                raise IOError('Network error')
+                raise IOError(f'{self}: Network error')
             message.extend(fragment)
             size -= len(fragment)
         return message
 
-    def accept(self):
-        self.reconnect = self._accept
-
-    def _accept(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(self.address)
-        sock.listen(10)
-        sock.settimeout(1)
-        self.sock, _ = sock.accept()
-        self.sock.settimeout(1)
+    def accept(self, address):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(address)
+            sock.listen(10)
+            self.sock, _ = sock.accept()
+            return Channel(self.index, self.sock)
+        except socket.timeout as e:
+            raise ChannelTimeout(e)
+        except IOError as e:
+            logger.error(f'{self}: Exception in bind/listen/accept: {e}')
+            raise ChannelException(e)
 
     def send_data(self, data):
-        self.reconnect()
         size = len(data)
         header = b'%10d' % size
         self.sock.sendall(header)
         self.sock.sendall(data)
-        # self.sock.close()
-        self.sock = None
 
     def receive_data(self):
-        self.reconnect()
         header = self._receive_size(10)
         size = int(header)
         data = self._receive_size(size)
-        # self.sock.close()
-        self.sock = None
         return data
 
     def send(self, message):
         obj = pickle.dumps(message)
         try:
             self.send_data(obj)
-        except:
-            logger.error(f'chan{self.node.index}: Exception in send to {self.address}: {sys.exc_info()[1]}')
-            raise ChannelException(sys.exc_info())
+        except Exception as e:
+            logger.error(f'{self}: Exception in send: {e}')
+            raise ChannelException(e)
 
     def receive(self):
         try:
             obj = self.receive_data()
             message = pickle.loads(obj)
-            # logger.debug(f'chan{self.node.index}: Got message: {message}')
+            logger.debug(f'{self}: Got message: {message}')
             return message
-        except socket.timeout:
-            raise ChannelTimeout(sys.exc_info())
-        except IOError:
-            logger.errro(f'chan{self.node.index}: Exception in receive from {self.address}: {sys.exc_info()[1]}')
-            time.sleep(randint(2, 9))
-            if self.sock:
-                self.sock.close()
-            self.sock = None
-            raise ChannelException(sys.exc_info())
-
-
-class ClientChannel(Channel):
-    def __init__(self, node, index, dest):
-        super().__init__(node, index, dest)
-        self.reconnect = self._connect
-
-
-class ServerChannel(Channel, Thread):
-    def __init__(self, node, index, address):
-        super().__init__(node, index, address)
-        self.reconnect = self._accept
+        except socket.timeout as e:
+            raise ChannelTimeout(e)
+        except IOError as e:
+            logger.error(f'{self}: Exception in receive: {e}')
+            raise ChannelException(e)

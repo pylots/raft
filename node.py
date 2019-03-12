@@ -7,17 +7,18 @@ import copy
 from random import randint
 
 from threading import Thread
-from queue import Queue
-from channel import ClientChannel, ServerChannel, ChannelTimeout, ChannelException
-from state import RestartState
-from messages import TimeoutMessage, ExceptionMessage, LogMessage, AckMessage
+from queue import Queue, Empty
+from channel import Channel, ChannelTimeout, ChannelException
+from state import FollowerState
+from messages import TimeoutMessage, ExceptionMessage, LogMessage, AckMessage, SystemMessage
+
 
 BASEPORT = 9000
 
 logging.basicConfig(
     filename='raft.log',
     level=logging.INFO,
-    format='%(asctime)s.%(msecs)03d %(levelname).3s [%(name)s:%(lineno)s] %(message)s',
+    format='%(asctime)s.%(msecs)03d %(levelname).3s %(threadName)s [%(name)s:%(lineno)s] %(message)s',
     datefmt='%y%m%d %H%M%S'
 )
 
@@ -69,8 +70,6 @@ class NodeController:
         t = 1
         for node in self.nodes:
             s = node.state.__class__.__name__[0]
-            m_in = node.in_queue.qsize()
-            m_out = node.out_queue.qsize()
             color = reset
             if s in colormap:
                 color = colormap[s]
@@ -80,13 +79,36 @@ class NodeController:
             else:
                 status = status + color + s + reset
             i += 1
-        status += f'] {index}:{t} {m_in}:{m_out} {request}'
+        status += f'] {index}:{t} {request}'
         if response:
             status += f'=>{response.mdest}: {response.request}'
         if self.status_text:
             status += self.status_text
             self.status_text = None
         print(status)
+
+
+class Config:
+    def __init__(self, name):
+        self.path = name
+        if os.path.isfile(self.path):
+            self.config = json.loads(open(self.path, 'r').read())
+        else:
+            self.config = {}
+
+    def __str__(self):
+        return str(self.config)
+
+    def __getitem__(self, key):
+        if key not in self.config:
+            self.config[key] = 0
+        return self.config[key]
+
+    def __setitem__(self, key, val):
+        self.config[key] = val
+
+    def save(self):
+        open(self.path, 'w+').write(json.dumps(self.config))
 
 
 class Node:
@@ -97,7 +119,8 @@ class Node:
         self.config = Config(f'node{self.index}.json')
         logger.info(f'config={self.config}')
         self.address = ('localhost', BASEPORT + self.index)
-        self.channel = None
+        self.queue = None
+        self.nodes = {}
         self.timeout = 1
         self.lastTerm = 0
         # The server's state (Follower, Candidate, or Leader).
@@ -131,7 +154,9 @@ class Node:
         return f'node{self.index}: ({self.currentTerm}): {self.state}'
 
     def init(self):
-        self.set_state(RestartState)
+        self.queue = ServerQueue(self, self.index, self.address)
+        self.queue.start()
+        self.set_state(FollowerState)
 
     def set_state(self, state):
         self.timeout = randint(5, 9)
@@ -140,6 +165,21 @@ class Node:
             self.state.leave()
         self.state = state(self)
         self.state.enter()
+
+    def receive(self):
+        return self.queue.receive()
+
+    def send(self, message):
+        if self.index == message.mdest:
+            logger.error(f'{self}: Sending {message} to myself {message.mdest}')
+            return
+        if message.mdest not in self.nodes:
+            logger.debug(f'{self}: No ClientQueue for {message.mdest}, create it...')
+            q = ClientQueue(message.mdest, ('localhost', BASEPORT + message.mdest))
+            self.nodes[message.mdest] = q
+            q.start()
+        node = self.nodes[message.mdest]
+        node.send(message)
 
     def dispatch(self, message):
         logger.debug(f'{self}: Dispatching {message}')
@@ -150,117 +190,121 @@ class Node:
                 m.mdest = index
                 logger.debug(f'{self}: Send {m} to node{index}')
                 self.send(m)
-                time.sleep(0.1)
 
 
-class Config:
-    def __init__(self, name):
-        self.path = name
-        if os.path.isfile(self.path):
-            self.config = json.loads(open(self.path, 'r').read())
-        else:
-            self.config = {}
-
-    def __str__(self):
-        return str(self.config)
-
-    def __getitem__(self, key):
-        if key not in self.config:
-            self.config[key] = 0
-        return self.config[key]
-
-    def __setitem__(self, key, val):
-        self.config[key] = val
-
-    def save(self):
-        open(self.path, 'w+').write(json.dumps(self.config))
-
-
-class ServerQueue(Thread):
-    def __init__(self, node):
+class ServerChannel(Thread):
+    def __init__(self, node, index, queue, channel):
         super().__init__()
         self.node = node
-        self.index = node.index
-        self.server_q = Queue()
-        self.channel = ServerChannel(self, self.index, self.node.address)
-
-    def qsize(self):
-        return self.server_q.qsize()
+        self.queue = queue
+        self.channel = channel
 
     def run(self):
-        now = time.time()
         while True:
             try:
                 message = self.channel.receive()
                 # logger.debug(f'{self.node}: Server got message from channel: {message}, now={now}')
             except ChannelTimeout:
-                nnow = time.time()
-                if nnow - now < self.node.timeout:
-                    # logger.debug(f'{self.node}: Not no time for timeout {self.node.timeout}, ({nnow-now})')
-                    continue
-                # logger.debug(f'{self.node}: Finaly a timeout')
-                message = TimeoutMessage(int(time.time()-now))
-            except ChannelException:
-                message = ExceptionMessage(sys.exc_info())
-            self.server_q.put(message)
-            nnow = time.time()
-            # logger.debug(f'{self.node}: timeout = {self.node.timeout}, time passed: {nnow-now} ({onow-now})')
-            now = time.time()
+                message = TimeoutMessage(0)
+            except ChannelException as e:
+                logger.info(f'{self.node}: Read exception {e}, bye...')
+                return
+            self.queue.put(message)
+            # logger.debug(f'{self.node}: timeout = {self.node.timeout}, time passed: {time.time()-now}')
 
-    def receive(self):
-        message = self.server_q.get()
-        # logger.debug(f'{self.node}: Received {message}')
+
+class ServerQueue(Thread):
+    def __init__(self, node, index, address):
+        super().__init__()
+        self.node = node
+        self.index = index
+        self.address = address
+        self.queue = Queue()
+        self.connections = {}
+
+    def run(self):
+        while True:
+            self.channel = Channel(self.index)
+            self.queue.put(SystemMessage('Initialized'))
+            running = True
+            while running:
+                try:
+                    channel = self.channel.accept(self.address)
+                except ChannelTimeout:
+                    self.queue.put(TimeoutMessage(0))
+                    continue
+                except ChannelException as e:
+                    logger.error(f'REINIT: ChannelException {e}')
+                    self.queue.put(ExceptionMessage(e))
+                    running = False
+                    continue
+                logger.debug(f'{self.node.index}: Got a new channel: {channel}')
+                sc = ServerChannel(self.node, self.index, self.queue, channel)
+                self.connections[self.index] = sc
+                sc.start()
+                self.queue.put(SystemMessage(f'NewClient connected to: {self.address}'))
+
+    def receive(self, timeout):
+        try:
+            message = self.queue.get(timeout=timeout)
+        except Empty:
+            message = TimeoutMessage(timeout)
         return message
+
+    def send(self, message):
+        self.channel.send(message)
+
+
+class ClientChannel(Thread):
+    def __init__(self, index, channel):
+        super().__init__()
+
+    def run(self):
+        while True:
+            message = self.queue.get()
+            self.channel.send(message)
 
 
 class ClientQueue(Thread):
-    def __init__(self, node):
+    def __init__(self, index, address):
         super().__init__()
-        self.node = node
-        self.index = node.index
-        self.client_q = Queue()
-
-    def qsize(self):
-        return self.client_q.qsize()
-
-    def run(self):
-        logger.info(f'{self.index}: ClientQueue running')
-        self.retry = 0
-        while True:
-            if self.retry > 5:
-                logger.error(f'Giving up on sending message: {message}')
-                self.retry = 0
-            if not self.retry:
-                message = self.client_q.get()
-            try:
-                # logger.debug(f'{self.node}: SendThread: {message}')
-                channel = ClientChannel(self.node, self.index, ('localhost', BASEPORT + message.mdest))
-                channel.connect()
-                channel.send(message)
-                self.retry = 0
-                # logger.debug(f'{self.node}: Sent {message}')
-            except:
-                logger.warning(f'Exception sending: {message} {sys.exc_info()[1]}')
-                self.retry += 1
+        self.index = index
+        self.address = address
+        self.queue = Queue()
+        self.channel = Channel(self.index)
 
     def send(self, message):
-        # logger.debug(f'{self.node}: client_q put {message}')
-        return self.client_q.put(message)
+        return self.queue.put(message)
+
+    def run(self):
+        logger.info(f'{self.index}: ClientQueue running, connect to {self.address}')
+        self.retry = 0
+        while True:
+            try:
+                self.channel.connect(self.address)
+            except Exception as e:
+                logger.error(f'{self.index}: Channel connect exception {e}')
+                continue
+            logger.debug(f'{self.index}: Connected to {self.address}')
+            message = None
+            while self.retry < 5:
+                if not message:
+                    message = self.queue.get()
+                try:
+                    self.channel.send(message)
+                    message = None
+                    self.retry = 0
+                    continue
+                except Exception as e:
+                    logger.warning(f'Exception sending: {message} {e} retry={self.retry}')
+                    self.retry += 1
 
 
 class Server(Node, Thread):
-    def init(self):
-        super().init()
-        self.in_queue = ServerQueue(self)
-        self.out_queue = ClientQueue(self)
-
     def run(self):
         logger.info(f'node{self.index}: Server ready on {self.address}')
-        self.in_queue.start()
-        self.out_queue.start()
         while True:
-            message = self.in_queue.receive()
-            # logger.debug(f'{self.index}: Server received: {message}')
+            message = self.queue.receive(self.timeout)
             handle = getattr(self.state, f'on_{message.request}')
             reply = handle(message)
             if reply:
@@ -269,49 +313,15 @@ class Server(Node, Thread):
             self.control.print_status(index=self.index, request=message,
                                       response=reply)
 
-    def send(self, m):
-        if self.index == m.mdest:
-            logger.error(f'{self.index}: Sending {m} to myself {m.mdest}')
-            return
-        self.out_queue.send(m)
-
     def close(self):
         self.config.save()
 
 
-class Client(Node):
-    def init(self, count=10):
-        self.count = count
-        self.address = ('localhost', BASEPORT + self.index)
-        self.channel = ClientChannel(self, self.index, self.address)
-
-    def run(self):
-        self.channel.connect()
-        for i in range(self.control.count):
-            log = LogMessage(i, 'Some log message %d' % i)
-            self.send(log)
-            ack = self.channel.receive()
-            if isinstance(ack, TimeoutMessage):
-                continue
-            if not isinstance(ack, AckMessage):
-                print(f'Got bad ACK: {ack.request}')
-
-
-debug = False
 if __name__ == "__main__":
-    port = 8888
     serve = False
-    if 'serve' in sys.argv:
-        serve = True
     if 'debug' in sys.argv:
-        debug = True
-    start = time.time()
-    if serve:
-        print('Starting NodeController')
-        nc = NodeController(5)
-        nc.init()
-        nc.start()
-    else:
-        client = Client(None)
-        client.init(10)
-        client.run()
+        logger.setLevel(logging.DEBUG)
+    print('Starting NodeController')
+    nc = NodeController(5)
+    nc.init()
+    nc.start()
