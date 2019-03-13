@@ -167,7 +167,9 @@ class Node:
         self.state.enter()
 
     def receive(self):
-        return self.queue.receive()
+        m = self.queue.receive()
+        logger.debug(f'{self}: Received {m}')
+        return m
 
     def send(self, message):
         if self.index == message.mdest:
@@ -179,6 +181,7 @@ class Node:
             self.nodes[message.mdest] = q
             q.start()
         node = self.nodes[message.mdest]
+        logger.debug(f'{self}: Send {message} to {message.mdest}')
         node.send(message)
 
     def dispatch(self, message):
@@ -188,7 +191,6 @@ class Node:
                 m = copy.deepcopy(message)
                 m.msource = self.index
                 m.mdest = index
-                logger.debug(f'{self}: Send {m} to node{index}')
                 self.send(m)
 
 
@@ -224,6 +226,7 @@ class ServerQueue(Thread):
 
     def run(self):
         while True:
+            logger.debug(f'{self.index}: Create new Accept channel')
             self.channel = Channel(self.index)
             self.queue.put(SystemMessage('Initialized'))
             running = True
@@ -249,6 +252,7 @@ class ServerQueue(Thread):
             message = self.queue.get(timeout=timeout)
         except Empty:
             message = TimeoutMessage(timeout)
+        logger.debug(f'{self.index}: Received message {message} from {message.msource}')
         return message
 
     def send(self, message):
@@ -271,7 +275,6 @@ class ClientQueue(Thread):
         self.index = index
         self.address = address
         self.queue = Queue()
-        self.channel = Channel(self.index)
 
     def send(self, message):
         return self.queue.put(message)
@@ -280,6 +283,7 @@ class ClientQueue(Thread):
         logger.info(f'{self.index}: ClientQueue running, connect to {self.address}')
         self.retry = 0
         while True:
+            self.channel = Channel(self.index)
             try:
                 self.channel.connect(self.address)
             except Exception as e:
@@ -287,6 +291,7 @@ class ClientQueue(Thread):
                 continue
             logger.debug(f'{self.index}: Connected to {self.address}')
             message = None
+            self.retry = 0
             while self.retry < 5:
                 if not message:
                     message = self.queue.get()

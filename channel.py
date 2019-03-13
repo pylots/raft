@@ -41,7 +41,7 @@ class Channel(object):
                 self.retry = 0
                 logger.debug(f'{self}: Got a connection to {address}')
                 return
-            except OSError as e:
+            except Exception as e:
                 self.retry += 1
                 logger.warning(f'{self}: Connect failed to {address} ({self.retry}): {e}')
                 time.sleep(1 + self.retry)

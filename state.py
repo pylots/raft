@@ -27,7 +27,7 @@ class State(object):
 
     def on_system(self, m):
         logger.debug(f'{self}: system {m}')
-        
+
     def on_exception(self, exc):
         logger.error(f'{self}: exception {exc}')
         return None
