@@ -158,7 +158,6 @@ class LeaderState(State):
             self.node.set_state(FollowerState)
             return AppendEntriesResponse(self.node.currentTerm, True, 0, self.node.index, m.msource, None)
         logger.debug(f'Ignoring Append message...')
-        return None
 
     def on_append_entries_response(self, m):
         logger.debug(f'{self}: Got {m}')

@@ -1,14 +1,14 @@
 import sys
 import logging
 from messages import LogMessage, AckMessage, TimeoutMessage
-from channel import RpcClientChannel
+from channel import Channel
 from node import BASEPORT
 
 class RaftHandler(logging.Handler):
     def __init__(self, index):
         super().__init__()
         self.index = index
-        self.client = RpcClientChannel(self, 0, ('localhost', BASEPORT + self.index))
+        self.client = Channel(self, 0, ('localhost', BASEPORT + self.index))
         self.client.connect()
 
     def emit(self, record):

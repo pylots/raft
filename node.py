@@ -171,6 +171,9 @@ class Node:
         logger.debug(f'{self}: Received {m}')
         return m
 
+    def ack(self, message):
+        self.channel.send(message)
+        
     def send(self, message):
         if self.index == message.mdest:
             logger.error(f'{self}: Sending {message} to myself {message.mdest}')
@@ -254,6 +257,9 @@ class ServerQueue(Thread):
             message = TimeoutMessage(timeout)
         logger.debug(f'{self.index}: Received message {message} from {message.msource}')
         return message
+
+    def ack(self, message):
+        self.channel.send(message)
 
     def send(self, message):
         self.channel.send(message)
